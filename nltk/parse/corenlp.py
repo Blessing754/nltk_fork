@@ -37,6 +37,21 @@ def try_port(port=0):
     return p
 
 
+def is_port_listening(host, port, timeout=0.1):
+    """Check if a port is listening (accepting connections).
+    
+    :param host: Hostname to check (e.g., 'localhost')
+    :param port: Port number to check
+    :param timeout: Socket timeout in seconds
+    :return: True if port is listening, False otherwise
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    result = sock.connect_ex((host, port))
+    sock.close()
+    return result == 0
+
+
 class CoreNLPServer:
     _MODEL_JAR_PATTERN = r"stanford-corenlp-(\d+)\.(\d+)\.(\d+)-models\.jar"
     _JAR = r"stanford-corenlp-(\d+)\.(\d+)\.(\d+)\.jar"
@@ -79,6 +94,7 @@ class CoreNLPServer:
             corenlp_options.extend(["-port", str(port)])
 
         self.url = f"http://localhost:{port}"
+        self.port = port
 
         model_jar = max(
             find_jar_iter(
@@ -136,7 +152,7 @@ class CoreNLPServer:
             # Return java configurations to their default values.
             config_java(options=default_options, verbose=self.verbose)
 
-        # Check that the server is istill running.
+        # Check that the server is still running.
         returncode = self.popen.poll()
         if returncode is not None:
             _, stderrdata = self.popen.communicate()
@@ -144,6 +160,39 @@ class CoreNLPServer:
                 returncode,
                 "Could not start the server. "
                 "The error was: {}".format(stderrdata.decode("ascii")),
+            )
+
+        # Wait for the port to be bound. This detects port binding failures
+        # (e.g., port already in use) which may occur during CoreNLP initialization
+        # that can take 1-30 seconds. We check the process status during this wait
+        # to catch any errors that occurred during initialization.
+        port_bound = False
+        for i in range(30):
+            # Check if port is now listening
+            if is_port_listening("localhost", self.port):
+                port_bound = True
+                break
+            # Check if the process has exited (indicating an error during initialization)
+            returncode = self.popen.poll()
+            if returncode is not None:
+                _, stderrdata = self.popen.communicate()
+                error_msg = stderrdata.decode("ascii") if stderrdata else "Unknown error"
+                raise CoreNLPServerError(
+                    returncode,
+                    "CoreNLP server exited during initialization. "
+                    "The error was: {}".format(error_msg),
+                )
+            time.sleep(1)
+        
+        # Check one more time if the process is still running
+        returncode = self.popen.poll()
+        if returncode is not None:
+            _, stderrdata = self.popen.communicate()
+            error_msg = stderrdata.decode("ascii") if stderrdata else "Unknown error"
+            raise CoreNLPServerError(
+                returncode,
+                "CoreNLP server exited unexpectedly. "
+                "The error was: {}".format(error_msg),
             )
 
         for i in range(30):
